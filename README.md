@@ -1,3 +1,5 @@
+<img src = './Architecture diagram.png'/>
+
 ## mini_transformer
 mini_transformer is designed to rapidly construct state-of-the-art new architectures for transformer
 
