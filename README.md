@@ -44,7 +44,7 @@ out, aux_loss = model(data, start_pos, mask)
 print(out.shape, aux_loss)
 ```
 
-3、use moe architecture
+3、use MOE architecture
 ```python
 import torch
 from mini_transformer import Transformer
@@ -60,7 +60,7 @@ out, aux_loss = model(data, start_pos, mask)
 print(out.shape, aux_loss)
 ```
 
-3、inference(kv_cache)
+4、inference(kv_cache)
 ```python
 import torch
 from mini_transformer import Transformer
@@ -78,7 +78,7 @@ out, _ = model(inference_data, start_pos, use_cache = True)
 print(out.shape)
 ```
 
-4、inference(no kv_cache)
+5、inference(no kv_cache)
 ```python
 import torch
 from mini_transformer import Transformer
