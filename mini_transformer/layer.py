@@ -226,6 +226,95 @@ class MLP(nn.Module):
         return self.linear2(self.silu(self.linear1(x)) * self.linear3(x))
 
 
+class Gate(nn.Module):
+
+    def __init__(self,
+                 dim: int = 512,
+                 topk: int = 2,
+                 n_route_expert: int = 4,
+                 route_scale: float = 1.0,
+                 alpha: float = 0.1,
+                 score_func: str = 'softmax'
+                 ):
+        super().__init__()
+        self.dim = dim
+        self.topk = topk
+        self.n_route_expert = n_route_expert
+        self.route_scale = route_scale
+        self.alpha = alpha
+        self.score_func = score_func
+
+        self.linear = nn.Linear(self.dim, self.n_route_expert, bias = False)
+
+    def forward(self, x: torch.Tensor):
+        # x:[b, n, d]
+        b, n, d = x.shape
+        x = x.view(-1, self.dim)
+        score = self.linear(x)
+        if self.score_func == 'softmax':
+            score = torch.softmax(score, dim = -1)
+        else:
+            score = torch.sigmoid(score)
+        weight, idx = torch.topk(score, k = self.topk, dim = -1)
+        if self.training and self.alpha > 0.0:
+            fi = torch.zeros(b, self.n_route_expert, device = x.device)
+            fi.scatter_add_(1, idx.view(b, -1), torch.ones(b, n * self.topk, device = x.device)).div_(
+                self.topk * n / self.n_route_expert
+            )
+            pi = score.view(b, n, -1).mean(dim = 1)
+            aux_loss = (fi * pi).sum(dim = 1).mean() * self.alpha
+        else:
+            aux_loss = 0.0
+        if self.score_func == 'sigmoid':
+            weight /= weight.sum(dim = -1, keepdim = True)
+        weight *= self.route_scale
+        return weight, idx, aux_loss
+
+
+class MOE(nn.Module):
+
+    def __init__(self,
+                 dim: int = 512,
+                 moe_inter_dim: int = 1344,
+                 topk: int = 2,
+                 n_route_expert: int = 4,
+                 n_share_expert: int = 2,
+                 route_scale: float = 1.0,
+                 score_func: str = 'softmax'
+                 ):
+        super().__init__()
+        self.dim = dim
+        self.moe_inter_dim = moe_inter_dim
+        self.topk = topk
+        self.n_route_expert = n_route_expert
+        self.n_share_expert = n_share_expert
+        self.route_scale = route_scale
+        self.score_func = score_func
+
+        self.gate = Gate(dim = self.dim, topk = self.topk, n_route_expert = self.n_route_expert,
+                         route_scale = self.route_scale, score_func = self.score_func)
+        self.expert = nn.ModuleList([
+            MLP(dim = self.dim, inter_dim = self.moe_inter_dim) for _ in range(self.n_route_expert)
+        ])
+        self.share_expert = MLP(dim = self.dim, inter_dim = self.n_share_expert * moe_inter_dim)
+
+    def forward(self, x: torch.Tensor):
+        # x:[b, n, d]
+        shape = x.shape
+        weight, idx, aux_loss = self.gate(x)
+        x = x.view(-1, self.dim)
+        y = torch.zeros_like(x)
+        counts = torch.bincount(idx.flatten(), minlength = self.n_route_expert).tolist()
+        for i in range(self.n_route_expert):
+            if counts[i] == 0:
+                continue
+            expert = self.expert[i]
+            row, col = torch.where(idx == i)
+            y[row] += expert(x[row]) * weight[row, col, None]
+        z = self.share_expert(x)
+        return (y + z).view(shape), aux_loss
+
+
 class Block(nn.Module):
 
     def __init__(self,
@@ -241,6 +330,13 @@ class Block(nn.Module):
                  # GQA
                  n_kv_head: int = 2,
                  dropout: float = 0.0,
+                 # MOE
+                 moe_inter_dim: int = 1344,
+                 topk: int = 2,
+                 n_route_expert: int = 4,
+                 n_share_expert: int = 2,
+                 route_scale: float = 1.0,
+                 score_func: str = 'softmax',
                  # common
                  max_batch_size: int = 32,
                  max_seq_len: int = 512 * 8,
@@ -248,21 +344,25 @@ class Block(nn.Module):
                  mlp_name = 'mlp'
                  ):
         super().__init__()
+        self.mlp_name = mlp_name
 
         if attn_name == 'MLA' or attn_name == 'mla':
             self.attn = MLA(dim = dim, n_head = n_head, q_lora_rank = q_lora_rank, kv_lora_rank = kv_lora_rank,
                             qk_nope_head_dim = qk_nope_head_dim, qk_rope_head_dim = qk_rope_head_dim,
                             v_head_dim = v_head_dim, max_batch_size = max_batch_size, max_seq_len = max_seq_len)
-        elif attn_name == 'GQA' or attn_name ==  'gqa':
+        elif attn_name == 'GQA' or attn_name == 'gqa':
             self.attn = GQA(dim = dim, n_head = n_head, n_kv_head = n_kv_head, dropout = dropout,
                             max_batch_size = max_batch_size, max_seq_len = max_seq_len)
         else:
             raise ValueError('attn_name must be MLA or GQA')
 
-        if mlp_name == 'mlp':
+        if mlp_name == 'MLP' or mlp_name == 'mlp':
             self.mlp = MLP(dim = dim, inter_dim = inter_dim)
+        elif mlp_name == 'MOE' or mlp_name == 'moe':
+            self.mlp = MOE(dim = dim, moe_inter_dim = moe_inter_dim, topk = topk, n_route_expert = n_route_expert,
+                           n_share_expert = n_share_expert, route_scale = route_scale, score_func = score_func)
         else:
-            raise ValueError('mlp_name must be mlp')
+            raise ValueError('mlp_name must be MLP or MOE')
 
         self.attn_norm = RMSNorm(dim)
         self.mlp_norm = RMSNorm(dim)
@@ -274,9 +374,17 @@ class Block(nn.Module):
                 mask: torch.Tensor = None,
                 use_cache: bool = False
                 ):
-        x = x + self.attn(self.attn_norm(x), start_pos, rope_emb, mask = mask, use_cache = use_cache)
-        x = x + self.mlp(self.mlp_norm(x))
-        return x
+        if self.mlp_name == 'MLP' or self.mlp_name == 'mlp':
+            x = x + self.attn(self.attn_norm(x), start_pos, rope_emb, mask = mask, use_cache = use_cache)
+            x = x + self.mlp(self.mlp_norm(x))
+            return x, 0.0
+        elif self.mlp_name == 'MOE' or self.mlp_name == 'moe':
+            x = x + self.attn(self.attn_norm(x), start_pos, rope_emb, mask = mask, use_cache = use_cache)
+            h, aux_loss = self.mlp(self.mlp_norm(x))
+            x = x + h
+            return x, aux_loss
+        else:
+            raise ValueError('mlp_name must be MLP or MOE')
 
 
 class Transformer(nn.Module):
@@ -296,6 +404,13 @@ class Transformer(nn.Module):
                  # GQA
                  n_kv_head: int = 2,
                  dropout: float = 0.0,
+                 # MOE
+                 moe_inter_dim: int = 1344,
+                 topk: int = 2,
+                 n_route_expert: int = 4,
+                 n_share_expert: int = 2,
+                 route_scale: float = 1.0,
+                 score_func: str = 'softmax',
                  # Transformer
                  n_layer: int = 8,
                  # common
@@ -311,8 +426,10 @@ class Transformer(nn.Module):
         self.transformer = nn.ModuleList([
             Block(dim=dim, inter_dim=inter_dim, n_head=n_head, q_lora_rank=q_lora_rank,
                   kv_lora_rank=kv_lora_rank, qk_nope_head_dim=qk_nope_head_dim, qk_rope_head_dim=qk_rope_head_dim,
-                  v_head_dim=v_head_dim, n_kv_head=n_kv_head, dropout=dropout, max_batch_size=max_batch_size,
-                  max_seq_len=max_seq_len, attn_name=attn_name, mlp_name=mlp_name)
+                  v_head_dim=v_head_dim, n_kv_head=n_kv_head, dropout=dropout, moe_inter_dim=moe_inter_dim,
+                  topk=topk, n_route_expert=n_route_expert, n_share_expert=n_share_expert, route_scale=route_scale,
+                  score_func=score_func, max_batch_size=max_batch_size, max_seq_len=max_seq_len,
+                  attn_name=attn_name, mlp_name=mlp_name)
             for _ in range(n_layer)
         ])
 
@@ -321,7 +438,7 @@ class Transformer(nn.Module):
 
         self.register_buffer('rope_emb',
                              precompute_rope_emb(dim = qk_rope_head_dim, seq_len = max_seq_len) if attn_name == 'mla'
-                             else precompute_rope_emb(dim = dim // n_head, seq_len = max_seq_len),
+                             or attn_name == 'MLA' else precompute_rope_emb(dim = dim // n_head, seq_len = max_seq_len),
                              persistent = False
                              )
 
@@ -338,10 +455,12 @@ class Transformer(nn.Module):
         x = self.token_embedding(x)
         rope_emb = self.rope_emb[start_pos: end_pos]
         # transformer
+        aux_loss_list = []
         for layer in self.transformer:
-            x = layer(x, start_pos, rope_emb, mask = mask, use_cache = use_cache)
+            x, aux_loss = layer(x, start_pos, rope_emb, mask = mask, use_cache = use_cache)
+            aux_loss_list.append(aux_loss)
         out = self.to_out(self.out_norm(x))
-        return out
+        return out, sum(aux_loss_list)
 
 
 if __name__ == '__main__':
@@ -349,18 +468,38 @@ if __name__ == '__main__':
 
     mask = torch.triu(torch.full((512, 512), float('-inf')), 1)
 
-    model = Transformer(attn_name = 'mla')
+    model = Transformer(attn_name = 'MLA', mlp_name = 'mlp')
     total_param = 0
     for param in model.parameters():
         if param.requires_grad:
             total_param += param.numel()
     print(total_param)
-    model(data, 0, mask = mask)
+    out, aux_loss = model(data, 0, mask = mask)
+    print(out.shape, aux_loss)
 
-    model = Transformer(attn_name='gqa')
+    model = Transformer(attn_name='gqa', mlp_name = 'mlp')
     total_param = 0
     for param in model.parameters():
         if param.requires_grad:
             total_param += param.numel()
     print(total_param)
-    model(data, 0, mask = mask)
+    out, aux_loss = model(data, 0, mask = mask)
+    print(out.shape, aux_loss)
+
+    model = Transformer(attn_name='MLA', mlp_name='moe')
+    total_param = 0
+    for param in model.parameters():
+        if param.requires_grad:
+            total_param += param.numel()
+    print(total_param)
+    out, aux_loss = model(data, 0, mask=mask)
+    print(out.shape, aux_loss)
+
+    model = Transformer(attn_name='gqa', mlp_name='moe')
+    total_param = 0
+    for param in model.parameters():
+        if param.requires_grad:
+            total_param += param.numel()
+    print(total_param)
+    out, aux_loss = model(data, 0, mask=mask)
+    print(out.shape, aux_loss)
