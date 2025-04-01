@@ -23,8 +23,10 @@ data = torch.randint(0, 6400, (2, 512))
 start_pos = 0
 mask = torch.triu(torch.full((data.shape[1], data.shape[1]), float('-inf')), 1)
 model = Transformer(attn_name = 'gqa')
-out = model(data, start_pos, mask)
-print(out.shape)
+# When mlp_name == 'mlp', aux_loss defaults to returning 0, 
+# meaning the aux_loss does not take effect.
+out, aux_loss = model(data, start_pos, mask)
+print(out.shape, aux_loss)
 ```
 
 2、use MLA attention(https://arxiv.org/abs/2412.19437)
@@ -36,8 +38,26 @@ data = torch.randint(0, 6400, (2, 512))
 start_pos = 0
 mask = torch.triu(torch.full((data.shape[1], data.shape[1]), float('-inf')), 1)
 model = Transformer(attn_name = 'mla')
-out = model(data, start_pos, mask)
-print(out.shape)
+# When mlp_name == 'mlp', aux_loss defaults to returning 0, 
+# meaning the aux_loss does not take effect.
+out, aux_loss = model(data, start_pos, mask)
+print(out.shape, aux_loss)
+```
+
+3、use moe architecture
+```python
+import torch
+from mini_transformer import Transformer
+
+data = torch.randint(0, 6400, (2, 512))
+start_pos = 0
+mask = torch.triu(torch.full((data.shape[1], data.shape[1]), float('-inf')), 1)
+model = Transformer(attn_name = 'mla', mlp_name = 'moe')
+# When mlp_name == 'moe_loss' and the model is in training mode, 
+# the aux_loss is computed and should be added to the final loss 
+# to balance the load of each router.
+out, aux_loss = model(data, start_pos, mask)
+print(out.shape, aux_loss)
 ```
 
 3、inference(kv_cache)
@@ -49,12 +69,12 @@ data = torch.randint(0, 6400, (2, 512))
 start_pos = 0
 mask = torch.triu(torch.full((data.shape[1], data.shape[1]), float('-inf')), 1)
 model = Transformer(attn_name = 'mla')
-out = model(data, start_pos, mask, use_cache = True)
+out, _ = model(data, start_pos, mask, use_cache = True)
 print(out.shape)
 
 inference_data = torch.randint(0, 6400, (2, 1))
 start_pos = data.shape[1]
-out = model(inference_data, start_pos, use_cache = True)
+out, _ = model(inference_data, start_pos, use_cache = True)
 print(out.shape)
 ```
 
@@ -68,13 +88,13 @@ data = torch.randint(0, 6400, (2, 512))
 start_pos = 0
 mask = torch.triu(torch.full((data.shape[1], data.shape[1]), float('-inf')), 1)
 model = Transformer(attn_name = 'mla')
-out = model(data, start_pos, mask)
+out, _ = model(data, start_pos, mask)
 print(out.shape)
 
 # inference
 data = torch.cat((data, torch.randint(0, 6400, (2, 1))), dim = 1)
 start_pos = 0
 mask = torch.triu(torch.full((data.shape[1], data.shape[1]), float('-inf')), 1)
-out = model(data, start_pos)
+out, _ = model(data, start_pos)
 print(out.shape)
 ```
