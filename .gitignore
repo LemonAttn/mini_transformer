@@ -4,3 +4,9 @@ venv/
 # pycharm
 .idea/
 __pycache__/
+
+# example
+example/
+
+# build
+dist/

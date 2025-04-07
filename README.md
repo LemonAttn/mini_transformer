@@ -98,3 +98,19 @@ mask = torch.triu(torch.full((data.shape[1], data.shape[1]), float('-inf')), 1)
 out, _ = model(data, start_pos)
 print(out.shape)
 ```
+
+## Support Models
+1、VIT
+```python
+import torch
+from mini_transformer.model import VIT
+
+data = torch.randn(2, 3, 224, 224)
+model = VIT(num_classes = None) # img encoder(clip、sigLip、janus)
+out = model.forward(data) # [b, d]
+print(out.shape)
+
+model = VIT(num_classes = 1000) # classification
+out = model.forward(data) # [b, 1000]
+print(out.shape)
+```
