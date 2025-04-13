@@ -461,3 +461,24 @@ class Transformer(nn.Module):
             aux_loss_list.append(aux_loss)
         out = self.to_out(self.out_norm(x))
         return out, sum(aux_loss_list)
+
+
+class Extract(nn.Module):
+
+    def __init__(self,
+                 method: str = 'cls'
+                 ):
+        super().__init__()
+        self.method = method
+
+    def forward(self, x: torch.Tensor):
+        if self.method == 'cls':
+            return x[:, 0]
+        elif self.method == 'img' or self.method == 'text':
+            return x[:, 1:]
+        elif self.method == 'all_mean':
+            return torch.mean(x, dim = 1)
+        elif self.method == 'post_mean':
+            return torch.mean(x[:, 1:], dim = 1)
+        else:
+            return x
